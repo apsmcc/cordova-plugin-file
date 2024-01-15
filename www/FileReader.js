@@ -17,14 +17,14 @@
  * specific language governing permissions and limitations
  * under the License.
  *
-*/
+ */
 
-const exec = require('cordova/exec');
-const modulemapper = require('cordova/modulemapper');
-const utils = require('cordova/utils');
-const FileError = require('./FileError');
-const ProgressEvent = require('./ProgressEvent');
-const origFileReader = modulemapper.getOriginalSymbol(window, 'FileReader');
+const exec = require("cordova/exec");
+const modulemapper = require("cordova/modulemapper");
+const utils = require("cordova/utils");
+const FileError = require("./FileError");
+const ProgressEvent = require("./ProgressEvent");
+const origFileReader = modulemapper.getOriginalSymbol(window, "FileReader");
 
 /**
  * This class reads the mobile device file system.
@@ -35,12 +35,14 @@ const origFileReader = modulemapper.getOriginalSymbol(window, 'FileReader');
  * @constructor
  */
 const FileReader = function () {
-    this._readyState = 0;
-    this._error = null;
-    this._result = null;
-    this._progress = null;
-    this._localURL = '';
-    this._realReader = origFileReader ? new origFileReader() : {}; // eslint-disable-line new-cap
+  this._readyState = 0;
+  this._error = null;
+  this._result = null;
+  this._progress = null;
+  this._localURL = "";
+  this._realReader = origFileReader ? new origFileReader() : {}; // eslint-disable-line new-cap
+  // Custom Property to control chunked reading
+  this.READ_CHUNKED = false;
 };
 
 /**
@@ -56,65 +58,70 @@ FileReader.EMPTY = 0;
 FileReader.LOADING = 1;
 FileReader.DONE = 2;
 
-utils.defineGetter(FileReader.prototype, 'readyState', function () {
-    return this._localURL ? this._readyState : this._realReader.readyState;
+utils.defineGetter(FileReader.prototype, "readyState", function () {
+  return this._localURL ? this._readyState : this._realReader.readyState;
 });
 
-utils.defineGetter(FileReader.prototype, 'error', function () {
-    return this._localURL ? this._error : this._realReader.error;
+utils.defineGetter(FileReader.prototype, "error", function () {
+  return this._localURL ? this._error : this._realReader.error;
 });
 
-utils.defineGetter(FileReader.prototype, 'result', function () {
-    return this._localURL ? this._result : this._realReader.result;
+utils.defineGetter(FileReader.prototype, "result", function () {
+  return this._localURL ? this._result : this._realReader.result;
 });
 
-function defineEvent (eventName) {
-    utils.defineGetterSetter(FileReader.prototype, eventName, function () {
-        return this._realReader[eventName] || null;
-    }, function (value) {
-        this._realReader[eventName] = value;
-    });
+function defineEvent(eventName) {
+  utils.defineGetterSetter(
+    FileReader.prototype,
+    eventName,
+    function () {
+      return this._realReader[eventName] || null;
+    },
+    function (value) {
+      this._realReader[eventName] = value;
+    }
+  );
 }
 
 // When the read starts.
-defineEvent('onloadstart');
+defineEvent("onloadstart");
 
 // While reading (and decoding) file or fileBlob data, and reporting partial file data (progress.loaded/progress.total)
-defineEvent('onprogress');
+defineEvent("onprogress");
 
 // When the read has successfully completed.
-defineEvent('onload');
+defineEvent("onload");
 
 // When the read has failed (see errors).
-defineEvent('onerror');
+defineEvent("onerror");
 
 // When the request has completed (either in success or failure).
-defineEvent('onloadend');
+defineEvent("onloadend");
 
 // When the read has been aborted. For instance, by invoking the abort() method.
-defineEvent('onabort');
+defineEvent("onabort");
 
-function initRead (reader, file) {
-    // Already loading something
-    if (reader.readyState === FileReader.LOADING) {
-        throw new FileError(FileError.INVALID_STATE_ERR);
-    }
+function initRead(reader, file) {
+  // Already loading something
+  if (reader.readyState === FileReader.LOADING) {
+    throw new FileError(FileError.INVALID_STATE_ERR);
+  }
 
-    reader._result = null;
-    reader._error = null;
-    reader._progress = 0;
-    reader._readyState = FileReader.LOADING;
+  reader._result = null;
+  reader._error = null;
+  reader._progress = 0;
+  reader._readyState = FileReader.LOADING;
 
-    if (typeof file.localURL === 'string') {
-        reader._localURL = file.localURL;
-    } else {
-        reader._localURL = '';
-        return true;
-    }
+  if (typeof file.localURL === "string") {
+    reader._localURL = file.localURL;
+  } else {
+    reader._localURL = "";
+    return true;
+  }
 
-    if (reader.onloadstart) {
-        reader.onloadstart(new ProgressEvent('loadstart', { target: reader }));
-    }
+  if (reader.onloadstart) {
+    reader.onloadstart(new ProgressEvent("loadstart", { target: reader }));
+  }
 }
 
 /**
@@ -128,103 +135,130 @@ function initRead (reader, file) {
  * @param accumulate A function that takes the callback result and accumulates it in this._result.
  * @param r Callback result returned by the last read exec() call, or null to begin reading.
  */
-function readSuccessCallback (readType, encoding, offset, totalSize, accumulate, r) {
-    if (this._readyState === FileReader.DONE) {
-        return;
+function readSuccessCallback(
+  readType,
+  encoding,
+  offset,
+  totalSize,
+  accumulate,
+  r
+) {
+  if (this._readyState === FileReader.DONE) {
+    return;
+  }
+
+  let CHUNK_SIZE = FileReader.READ_CHUNK_SIZE;
+  if (readType === "readAsDataURL") {
+    // Windows proxy does not support reading file slices as Data URLs
+    // so read the whole file at once.
+    CHUNK_SIZE =
+      cordova.platformId === "windows"
+        ? totalSize
+        : // Calculate new chunk size for data URLs to be multiply of 3
+          // Otherwise concatenated base64 chunks won't be valid base64 data
+          FileReader.READ_CHUNK_SIZE - (FileReader.READ_CHUNK_SIZE % 3) + 3;
+  }
+
+  if (typeof r !== "undefined") {
+    accumulate(r);
+    this._progress = Math.min(this._progress + CHUNK_SIZE, totalSize);
+
+    if (typeof this.onprogress === "function") {
+      this.onprogress(
+        new ProgressEvent("progress", {
+          loaded: this._progress,
+          total: totalSize,
+        })
+      );
+    }
+  }
+
+  if (typeof r === "undefined" || this._progress < totalSize) {
+    const execArgs = [
+      this._localURL,
+      offset + this._progress,
+      offset +
+        this._progress +
+        Math.min(totalSize - this._progress, CHUNK_SIZE),
+    ];
+    if (encoding) {
+      execArgs.splice(1, 0, encoding);
+    }
+    exec(
+      readSuccessCallback.bind(
+        this,
+        readType,
+        encoding,
+        offset,
+        totalSize,
+        accumulate
+      ),
+      readFailureCallback.bind(this),
+      "File",
+      readType,
+      execArgs
+    );
+  } else {
+    this._readyState = FileReader.DONE;
+
+    if (typeof this.onload === "function") {
+      this.onload(new ProgressEvent("load", { target: this }));
     }
 
-    let CHUNK_SIZE = FileReader.READ_CHUNK_SIZE;
-    if (readType === 'readAsDataURL') {
-        // Windows proxy does not support reading file slices as Data URLs
-        // so read the whole file at once.
-        CHUNK_SIZE = cordova.platformId === 'windows'
-            ? totalSize
-            : (
-                // Calculate new chunk size for data URLs to be multiply of 3
-                // Otherwise concatenated base64 chunks won't be valid base64 data
-                FileReader.READ_CHUNK_SIZE - (FileReader.READ_CHUNK_SIZE % 3) + 3
-            );
+    if (typeof this.onloadend === "function") {
+      this.onloadend(new ProgressEvent("loadend", { target: this }));
     }
-
-    if (typeof r !== 'undefined') {
-        accumulate(r);
-        this._progress = Math.min(this._progress + CHUNK_SIZE, totalSize);
-
-        if (typeof this.onprogress === 'function') {
-            this.onprogress(new ProgressEvent('progress', { loaded: this._progress, total: totalSize }));
-        }
-    }
-
-    if (typeof r === 'undefined' || this._progress < totalSize) {
-        const execArgs = [
-            this._localURL,
-            offset + this._progress,
-            offset + this._progress + Math.min(totalSize - this._progress, CHUNK_SIZE)];
-        if (encoding) {
-            execArgs.splice(1, 0, encoding);
-        }
-        exec(
-            readSuccessCallback.bind(this, readType, encoding, offset, totalSize, accumulate),
-            readFailureCallback.bind(this),
-            'File', readType, execArgs);
-    } else {
-        this._readyState = FileReader.DONE;
-
-        if (typeof this.onload === 'function') {
-            this.onload(new ProgressEvent('load', { target: this }));
-        }
-
-        if (typeof this.onloadend === 'function') {
-            this.onloadend(new ProgressEvent('loadend', { target: this }));
-        }
-    }
+  }
 }
 
 /**
  * Callback used by the following read* functions to handle errors.
  * Must be bound to the FileReader's this, e.g. readFailureCallback.bind(this)
  */
-function readFailureCallback (e) {
-    if (this._readyState === FileReader.DONE) {
-        return;
-    }
+function readFailureCallback(e) {
+  if (this._readyState === FileReader.DONE) {
+    return;
+  }
 
-    this._readyState = FileReader.DONE;
-    this._result = null;
-    this._error = new FileError(e);
+  this._readyState = FileReader.DONE;
+  this._result = null;
+  this._error = new FileError(e);
 
-    if (typeof this.onerror === 'function') {
-        this.onerror(new ProgressEvent('error', { target: this }));
-    }
+  if (typeof this.onerror === "function") {
+    this.onerror(new ProgressEvent("error", { target: this }));
+  }
 
-    if (typeof this.onloadend === 'function') {
-        this.onloadend(new ProgressEvent('loadend', { target: this }));
-    }
+  if (typeof this.onloadend === "function") {
+    this.onloadend(new ProgressEvent("loadend", { target: this }));
+  }
 }
 
 /**
  * Abort reading file.
  */
 FileReader.prototype.abort = function () {
-    if (origFileReader && !this._localURL) {
-        return this._realReader.abort();
-    }
-    this._result = null;
+  if (origFileReader && !this._localURL) {
+    return this._realReader.abort();
+  }
+  this._result = null;
 
-    if (this._readyState === FileReader.DONE || this._readyState === FileReader.EMPTY) {
-        return;
-    }
+  if (
+    this._readyState === FileReader.DONE ||
+    this._readyState === FileReader.EMPTY
+  ) {
+    return;
+  }
 
-    this._readyState = FileReader.DONE;
+  this._readyState = FileReader.DONE;
 
-    // If abort callback
-    if (typeof this.onabort === 'function') {
-        this.onabort(new ProgressEvent('abort', { target: this }));
-    }
-    // If load end callback
-    if (typeof this.onloadend === 'function') {
-        this.onloadend(new ProgressEvent('loadend', { target: this }));
-    }
+  // If abort callback
+  if (typeof this.onabort === "function") {
+    this.onabort(new ProgressEvent("abort", { target: this }));
+  }
+  // If load end callback
+  if (typeof this.onloadend === "function") {
+    this.onloadend(new ProgressEvent("loadend", { target: this }));
+  }
 };
 
 /**
@@ -234,20 +268,26 @@ FileReader.prototype.abort = function () {
  * @param encoding      [Optional] (see http://www.iana.org/assignments/character-sets)
  */
 FileReader.prototype.readAsText = function (file, encoding) {
-    if (initRead(this, file)) {
-        return this._realReader.readAsText(file, encoding);
-    }
+  if (initRead(this, file)) {
+    return this._realReader.readAsText(file, encoding);
+  }
 
-    // Default encoding is UTF-8
-    const enc = encoding || 'UTF-8';
+  // Default encoding is UTF-8
+  const enc = encoding || "UTF-8";
 
-    const totalSize = file.end - file.start;
-    readSuccessCallback.bind(this)('readAsText', enc, file.start, totalSize, function (r) {
-        if (this._progress === 0) {
-            this._result = '';
-        }
-        this._result += r;
-    }.bind(this));
+  const totalSize = file.end - file.start;
+  readSuccessCallback.bind(this)(
+    "readAsText",
+    enc,
+    file.start,
+    totalSize,
+    function (r) {
+      if (this._progress === 0) {
+        this._result = "";
+      }
+      this._result += r;
+    }.bind(this)
+  );
 };
 
 /**
@@ -258,19 +298,25 @@ FileReader.prototype.readAsText = function (file, encoding) {
  * @param file          {File} File object containing file properties
  */
 FileReader.prototype.readAsDataURL = function (file) {
-    if (initRead(this, file)) {
-        return this._realReader.readAsDataURL(file);
-    }
+  if (initRead(this, file)) {
+    return this._realReader.readAsDataURL(file);
+  }
 
-    const totalSize = file.end - file.start;
-    readSuccessCallback.bind(this)('readAsDataURL', null, file.start, totalSize, function (r) {
-        const commaIndex = r.indexOf(',');
-        if (this._progress === 0) {
-            this._result = r;
-        } else {
-            this._result += r.substring(commaIndex + 1);
-        }
-    }.bind(this));
+  const totalSize = file.end - file.start;
+  readSuccessCallback.bind(this)(
+    "readAsDataURL",
+    null,
+    file.start,
+    totalSize,
+    function (r) {
+      const commaIndex = r.indexOf(",");
+      if (this._progress === 0) {
+        this._result = r;
+      } else {
+        this._result += r.substring(commaIndex + 1);
+      }
+    }.bind(this)
+  );
 };
 
 /**
@@ -279,17 +325,23 @@ FileReader.prototype.readAsDataURL = function (file) {
  * @param file          {File} File object containing file properties
  */
 FileReader.prototype.readAsBinaryString = function (file) {
-    if (initRead(this, file)) {
-        return this._realReader.readAsBinaryString(file);
-    }
+  if (initRead(this, file)) {
+    return this._realReader.readAsBinaryString(file);
+  }
 
-    const totalSize = file.end - file.start;
-    readSuccessCallback.bind(this)('readAsBinaryString', null, file.start, totalSize, function (r) {
-        if (this._progress === 0) {
-            this._result = '';
-        }
-        this._result += r;
-    }.bind(this));
+  const totalSize = file.end - file.start;
+  readSuccessCallback.bind(this)(
+    "readAsBinaryString",
+    null,
+    file.start,
+    totalSize,
+    function (r) {
+      if (this._progress === 0) {
+        this._result = "";
+      }
+      this._result += r;
+    }.bind(this)
+  );
 };
 
 /**
@@ -298,16 +350,39 @@ FileReader.prototype.readAsBinaryString = function (file) {
  * @param file          {File} File object containing file properties
  */
 FileReader.prototype.readAsArrayBuffer = function (file) {
-    if (initRead(this, file)) {
-        return this._realReader.readAsArrayBuffer(file);
-    }
+  if (initRead(this, file)) {
+    return this._realReader.readAsArrayBuffer(file);
+  }
 
-    const totalSize = file.end - file.start;
-    readSuccessCallback.bind(this)('readAsArrayBuffer', null, file.start, totalSize, function (r) {
-        const resultArray = (this._progress === 0 ? new Uint8Array(totalSize) : new Uint8Array(this._result));
+  const totalSize = file.end - file.start;
+  readSuccessCallback.bind(this)(
+    "readAsArrayBuffer",
+    null,
+    file.start,
+    totalSize,
+    function (r) {
+      let resultArray;
+
+      if (!this.READ_CHUNKED) {
+        // Non-chunked read
+        resultArray =
+          this._progress === 0
+            ? new Uint8Array(totalSize)
+            : new Uint8Array(this._result);
         resultArray.set(new Uint8Array(r), this._progress);
-        this._result = resultArray.buffer;
-    }.bind(this));
+      } else {
+        // Chunked read, this will not end up with the whole file present at the end of the read process
+        let newSize = FileReader.READ_CHUNK_SIZE;
+        if (totalSize - this._progress < FileReader.READ_CHUNK_SIZE) {
+          newSize = totalSize - this._progress;
+        }
+        resultArray = new Uint8Array(newSize);
+        resultArray.set(new Uint8Array(r), 0);
+      }
+
+      this._result = resultArray.buffer;
+    }.bind(this)
+  );
 };
 
 module.exports = FileReader;
